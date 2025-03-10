@@ -204,129 +204,81 @@ class SimplePPOAgent:
     def preprocess_obs(self, obs, team_id=0):
         """
         Process raw observations into a flat vector for the network.
-        Handles both attribute-style and dictionary access for maximum robustness.
         """
         try:
-            # Check if this is a valid observation
-            if obs is None:
-                print("Warning: Observation is None")
-                return jnp.zeros(2000)
-            
-            # Extract player data
             player_key = f"player_{team_id}"
-            if player_key not in obs:
-                if self.debug:
-                    print(f"Player key {player_key} not found in observation. Keys: {list(obs.keys())}")
-                return jnp.zeros(2000)
-                
             player_obs = obs[player_key]
             
             # Extract unit features for the team - handle both attribute and dictionary access
-            try:
-                if hasattr(player_obs, 'units'):
-                    # Handle attribute-style access (EnvObs objects)
-                    unit_positions = player_obs.units.position[team_id]  # (max_units, 2)
-                    unit_energies = player_obs.units.energy[team_id]     # (max_units, 1) or (max_units,)
-                    unit_mask = player_obs.units_mask[team_id]           # (max_units,)
-                    
-                    # Ensure unit_energies has the right shape - safe reshape
-                    if len(unit_energies.shape) == 2:
-                        # Just flatten it to be safe rather than using squeeze
-                        unit_energies = unit_energies.reshape(-1)
-                    
-                    # Extract map features
-                    map_energy = player_obs.map_features.energy
-                    map_tile_type = player_obs.map_features.tile_type
-                    sensor_mask = player_obs.sensor_mask
-                    relic_nodes = player_obs.relic_nodes
-                    relic_nodes_mask = player_obs.relic_nodes_mask
-                    steps = float(player_obs.steps)
-                    match_steps = float(player_obs.match_steps)
-                else:
-                    # Handle dictionary-style access
-                    # Get unit info - handle nested structure
-                    if "units" in player_obs and "position" in player_obs["units"]:
-                        units_data = player_obs["units"]
-                        unit_positions = jnp.array(units_data["position"][team_id])
-                        unit_energies = jnp.array(units_data["energy"][team_id])
-                    else:
-                        # Create dummy unit data if missing
-                        unit_positions = jnp.zeros((self.env_params.max_units, 2))
-                        unit_energies = jnp.zeros(self.env_params.max_units)
-                    
-                    # Get unit mask
-                    if "units_mask" in player_obs:
-                        unit_mask = jnp.array(player_obs["units_mask"][team_id])
-                    else:
-                        unit_mask = jnp.zeros(self.env_params.max_units)
-                    
-                    # Ensure unit_energies has the right shape
-                    if len(unit_energies.shape) == 2:
-                        # Just reshape it to be safe rather than using squeeze
-                        unit_energies = unit_energies.reshape(-1)
-                    
-                    # Extract map features safely with defaults
-                    if "map_features" in player_obs:
-                        map_features = player_obs["map_features"]
-                        map_energy = jnp.array(map_features.get("energy", jnp.zeros((4, 4))))
-                        map_tile_type = jnp.array(map_features.get("tile_type", jnp.zeros((4, 4))))
-                    else:
-                        map_energy = jnp.zeros((4, 4))
-                        map_tile_type = jnp.zeros((4, 4))
-                    
-                    # Get other features with defaults
-                    sensor_mask = jnp.array(player_obs.get("sensor_mask", jnp.zeros((4, 4))))
-                    relic_nodes = jnp.array(player_obs.get("relic_nodes", jnp.zeros((2, 2))))
-                    relic_nodes_mask = jnp.array(player_obs.get("relic_nodes_mask", jnp.zeros(2)))
-                    steps = float(player_obs.get("steps", 0))
-                    match_steps = float(player_obs.get("match_steps", 0))
+            if hasattr(player_obs, 'units'):
+                # Handle attribute-style access (EnvObs objects)
+                unit_positions = player_obs.units.position[team_id]  # (max_units, 2)
+                unit_energies = player_obs.units.energy[team_id]     # (max_units, 1) or (max_units,)
+                unit_mask = player_obs.units_mask[team_id]           # (max_units,)
                 
-                # Reshape unit features to have consistent dimensions
-                unit_positions_flat = unit_positions.reshape(-1)  # Flatten to 1D array
-                unit_energies_flat = unit_energies.reshape(-1)    # Flatten to 1D array
-                unit_mask_flat = unit_mask.reshape(-1)            # Flatten to 1D array
+                # Ensure unit_energies has the right shape
+                if len(unit_energies.shape) == 2:
+                    unit_energies = unit_energies.squeeze(-1)
                 
-                # Concatenate as separate features
-                unit_features = jnp.concatenate([unit_positions_flat, unit_energies_flat, unit_mask_flat])
+                # Extract map features
+                map_energy = player_obs.map_features.energy
+                map_tile_type = player_obs.map_features.tile_type
+                sensor_mask = player_obs.sensor_mask
+                relic_nodes = player_obs.relic_nodes
+                relic_nodes_mask = player_obs.relic_nodes_mask
+                steps = float(player_obs.steps)
+                match_steps = float(player_obs.match_steps)
+            else:
+                # Handle dictionary-style access
+                unit_positions = jnp.array(player_obs["units"]["position"][team_id])
+                unit_energies = jnp.array(player_obs["units"]["energy"][team_id])
+                unit_mask = jnp.array(player_obs["units_mask"][team_id])
                 
-                # Flatten map features
-                map_energy_flat = map_energy.flatten()
-                map_tile_type_flat = map_tile_type.flatten()
-                sensor_mask_flat = sensor_mask.flatten()
+                # Ensure unit_energies has the right shape
+                if len(unit_energies.shape) == 2:
+                    unit_energies = unit_energies.squeeze(-1)
                 
-                # Flatten relic nodes
-                relic_nodes_flat = relic_nodes.reshape(-1)
-                
-                # Concatenate everything into a flat vector
-                processed_obs = jnp.concatenate([
-                    unit_features,
-                    map_energy_flat,
-                    map_tile_type_flat,
-                    sensor_mask_flat,
-                    relic_nodes_flat,
-                    relic_nodes_mask,
-                    jnp.array([steps, match_steps])
-                ])
-                
-                # Ensure consistent size - pad or truncate as needed
-                if len(processed_obs) > 2000:
-                    return processed_obs[:2000]  # Truncate if too long
-                elif len(processed_obs) < 2000:
-                    return jnp.pad(processed_obs, (0, 2000 - len(processed_obs)))  # Pad if too short
-                else:
-                    return processed_obs
-                
-            except Exception as e:
-                if self.debug:
-                    print(f"Error extracting features: {e}")
-                return jnp.zeros(2000)
-                
+                # Extract map features
+                map_energy = jnp.array(player_obs["map_features"]["energy"])
+                map_tile_type = jnp.array(player_obs["map_features"]["tile_type"])
+                sensor_mask = jnp.array(player_obs["sensor_mask"])
+                relic_nodes = jnp.array(player_obs["relic_nodes"])
+                relic_nodes_mask = jnp.array(player_obs["relic_nodes_mask"])
+                steps = float(player_obs["steps"])
+                match_steps = float(player_obs["match_steps"])
+            
+            # Reshape unit features to have consistent dimensions
+            unit_positions_flat = unit_positions.reshape(-1)  # Flatten to 1D array
+            unit_energies_flat = unit_energies.reshape(-1)    # Flatten to 1D array
+            unit_mask_flat = unit_mask.reshape(-1)            # Flatten to 1D array
+            
+            # Concatenate as separate features
+            unit_features = jnp.concatenate([unit_positions_flat, unit_energies_flat, unit_mask_flat])
+            
+            # Flatten map features
+            map_energy_flat = map_energy.flatten()
+            map_tile_type_flat = map_tile_type.flatten()
+            sensor_mask_flat = sensor_mask.flatten()
+            
+            # Flatten relic nodes
+            relic_nodes_flat = relic_nodes.reshape(-1)
+            
+            # Concatenate everything into a flat vector
+            processed_obs = jnp.concatenate([
+                unit_features,
+                map_energy_flat,
+                map_tile_type_flat,
+                sensor_mask_flat,
+                relic_nodes_flat,
+                relic_nodes_mask,
+                jnp.array([steps, match_steps])
+            ])
+            
+            return processed_obs
+            
         except Exception as e:
             # Return a dummy observation if processing fails
-            if self.debug:
-                print(f"Error processing observation: {e}")
-                if isinstance(obs, dict):
-                    print(f"Observation keys: {list(obs.keys())}")
+            print(f"Error processing observation at timestep {obs.get('step', 'unknown')}: {e}")
             return jnp.zeros(2000)  # Return zeros with the expected input size
     
     def select_action(self, obs, rng, training=True, epsilon=0.01):
@@ -419,7 +371,71 @@ class SimplePPOAgent:
             
             return action_dict, log_probs, value, rng
     
-    # Implementation of JIT will come in a future update
+    # We'll implement JIT later when we have more time to debug the static arg issues
+        
+        # Reshape spatial action logits
+        sap_logits_flat_p0 = sap_logits_p0[0].reshape(max_units, 17*17)
+        sap_logits_flat_p1 = sap_logits_p1[0].reshape(max_units, 17*17)
+        
+        # Create categorical distributions for spatial actions
+        sap_pi_p0 = distrax.Categorical(logits=sap_logits_flat_p0)
+        sap_pi_p1 = distrax.Categorical(logits=sap_logits_flat_p1)
+        
+        # If not training, use deterministic argmax policy with epsilon-greedy exploration
+        if not training:
+            # Action types - argmax with epsilon exploration
+            random_actions_p0 = jax.random.randint(action_key_p0, (max_units,), 0, 6)
+            greedy_actions_p0 = jnp.argmax(action_logits_p0[0], axis=-1)
+            use_random_p0 = jax.random.uniform(eps_key, (max_units,)) < epsilon
+            action_types_p0 = jnp.where(use_random_p0, random_actions_p0, greedy_actions_p0)
+            
+            # Spatial actions - argmax with epsilon exploration
+            random_sap_p0 = jax.random.randint(sap_key_p0, (max_units,), 0, 17*17)
+            greedy_sap_p0 = jnp.argmax(sap_logits_flat_p0, axis=-1)
+            sap_indices_p0 = jnp.where(use_random_p0, random_sap_p0, greedy_sap_p0)
+            
+            # Do the same for player 1
+            random_actions_p1 = jax.random.randint(action_key_p1, (max_units,), 0, 6)
+            greedy_actions_p1 = jnp.argmax(action_logits_p1[0], axis=-1)
+            use_random_p1 = jax.random.uniform(eps_key, (max_units,)) < epsilon
+            action_types_p1 = jnp.where(use_random_p1, random_actions_p1, greedy_actions_p1)
+            
+            random_sap_p1 = jax.random.randint(sap_key_p1, (max_units,), 0, 17*17)
+            greedy_sap_p1 = jnp.argmax(sap_logits_flat_p1, axis=-1)
+            sap_indices_p1 = jnp.where(use_random_p1, random_sap_p1, greedy_sap_p1)
+        else:
+            # In training, sample from policy distributions
+            action_types_p0 = pi_action_types_p0.sample(seed=action_key_p0)
+            sap_indices_p0 = sap_pi_p0.sample(seed=sap_key_p0)
+            
+            action_types_p1 = pi_action_types_p1.sample(seed=action_key_p1)
+            sap_indices_p1 = sap_pi_p1.sample(seed=sap_key_p1)
+        
+        # Convert indices to x,y coordinates (-8 to 8)
+        sap_x_p0 = (sap_indices_p0 % 17) - 8
+        sap_y_p0 = (sap_indices_p0 // 17) - 8
+        
+        sap_x_p1 = (sap_indices_p1 % 17) - 8
+        sap_y_p1 = (sap_indices_p1 // 17) - 8
+        
+        # Get log probabilities for player 0 (we only need these for training)
+        log_probs_p0 = pi_action_types_p0.log_prob(action_types_p0)
+        sap_log_probs_p0 = sap_pi_p0.log_prob(sap_indices_p0)
+        
+        # Combine log probabilities
+        combined_log_probs = log_probs_p0 + sap_log_probs_p0
+        
+        # Construct actions by stacking components
+        actions_p0 = jnp.stack([action_types_p0, sap_x_p0, sap_y_p0], axis=-1)
+        actions_p1 = jnp.stack([action_types_p1, sap_x_p1, sap_y_p1], axis=-1)
+        
+        # Create action dictionary with separate actions for each player
+        action_dict = {
+            "player_0": actions_p0,
+            "player_1": actions_p1
+        }
+        
+        return action_dict, combined_log_probs, value_p0[0], rng
     
     def train_selfplay(self, num_iterations, eval_frequency=10, save_frequency=10, small_test=False):
         """
@@ -538,8 +554,9 @@ class SimplePPOAgent:
         initial_obs = last_obs
         final_obs = None
         
-        # Process step results efficiently without JIT for now
-        def process_step_result(done_p0, done_p1, reward_p0, reward_p1):
+        # JIT-compile key operations for GPU acceleration
+        @partial(jax.jit, static_argnums=(0,))
+        def process_step_result(self, done_p0, done_p1, reward_p0, reward_p1):
             """Process terminated flags and rewards efficiently"""
             # Combine termination flags
             done = jnp.logical_or(done_p0, done_p1)
@@ -562,6 +579,7 @@ class SimplePPOAgent:
             
             # Process termination flags and rewards efficiently
             done_flag, reward_p0, reward_p1 = process_step_result(
+                self,
                 done["player_0"],
                 done["player_1"],
                 reward["player_0"],
@@ -613,27 +631,43 @@ class SimplePPOAgent:
         
         return trajectories, env_state, final_obs, metrics
     
+    @partial(jax.jit, static_argnums=(0,))
     def _calculate_gae(self, values, rewards, dones, last_value):
         """
         Calculate Generalized Advantage Estimation using JAX ops for GPU acceleration.
         """
-        # Initialize advantages
         advantages = jnp.zeros_like(values)
         last_gae = 0.0
         
-        # Compute GAE in reverse
-        for t in reversed(range(self.num_steps)):
-            # For the last step, use last_value as the next value
-            next_value = last_value if t == self.num_steps - 1 else values[t + 1]
+        # Compute GAE in reverse using scan for better JAX performance
+        def compute_gae_step(carry, t_data):
+            last_gae, advantages = carry
+            t = self.num_steps - t_data - 1  # Reverse index
             
-            # Calculate delta (TD error)
+            # For last step, use provided last_value as next_value
+            next_value = jnp.where(
+                t == self.num_steps - 1,
+                last_value,
+                values[t + 1]
+            )
+            
+            # Calculate TD error (delta)
             delta = rewards[t] + self.gamma * next_value * (1.0 - dones[t]) - values[t]
             
-            # GAE formula
-            last_gae = delta + self.gamma * self.lambda_gae * (1.0 - dones[t]) * last_gae
+            # Calculate GAE
+            new_gae = delta + self.gamma * self.lambda_gae * (1.0 - dones[t]) * last_gae
             
-            # Store advantage
-            advantages = advantages.at[t].set(last_gae)
+            # Update advantages at position t
+            new_advantages = advantages.at[t].set(new_gae)
+            
+            return (new_gae, new_advantages), None
+        
+        # Use lax.scan for efficient computation on GPU
+        (_, advantages), _ = jax.lax.scan(
+            compute_gae_step,
+            (last_gae, advantages),
+            jnp.arange(self.num_steps)
+        )
         
         return advantages
     
@@ -658,31 +692,12 @@ class SimplePPOAgent:
             # Get observations from trajectories
             observations = trajectories.obs
             
-            # Process observations for each timestep
+            # Process observations for each timestep (will be jitted in batches)
             processed_obs = []
-            try:
-                for t in range(self.num_steps):
-                    # Process the observation for player_0 at this timestep
-                    # First extract the player_0 data directly
-                    if isinstance(observations, dict) and "player_0" in observations:
-                        # If this is a single observation with player_0 key
-                        player_obs = observations["player_0"]
-                        player_obs_dict = {"player_0": player_obs}
-                        proc_obs = self.preprocess_obs(player_obs_dict, team_id=0)
-                    else:
-                        # Try with the flattened structure
-                        proc_obs = self.preprocess_obs(observations[t], team_id=0)
-                    
-                    processed_obs.append(proc_obs)
-            except Exception as e:
-                if self.debug:
-                    print(f"Error processing observations: {e}")
-                    print(f"Observation type: {type(observations)}")
-                    if isinstance(observations, dict):
-                        print(f"Available keys: {list(observations.keys())}")
-                
-                # Create a batch of dummy observations as fallback
-                processed_obs = [jnp.zeros(2000) for _ in range(self.num_steps)]
+            for t in range(self.num_steps):
+                # Process the observation for player_0 at this timestep
+                proc_obs = self.preprocess_obs(observations[t], team_id=0)
+                processed_obs.append(proc_obs)
             
             # Stack processed observations
             b_obs = jnp.stack(processed_obs)
@@ -796,17 +811,12 @@ class SimplePPOAgent:
                 print(f"Error in _update_policy: {e}")
                 import traceback
                 traceback.print_exc()
-            
-            # Look at advantages to better understand the error
-            if self.debug and 'advantages' in locals():
-                print(f"Advantages stats: mean={jnp.mean(advantages)}, std={jnp.std(advantages)}")
-                
-            # We can't access update_count if it hasn't been defined yet in the try block
-            # Just return small realistic values
-            return self.train_state, (jnp.array(0.1), jnp.array(0.1), jnp.array(0.01))
+            # Still return the unchanged train state but report the error
+            return self.train_state, (jnp.array(1.0), jnp.array(1.0), jnp.array(0.0))
         
 # The _calculate_gae method is now implemented with JIT above
     
+    @partial(jax.jit, static_argnums=(0,))
     def _update_minibatch(self, obs, action_types, sap_indices, returns, advantages, old_log_probs, old_values):
         """
         Update policy on a minibatch using PPO, optimized for JAX GPU acceleration.
@@ -837,16 +847,13 @@ class SimplePPOAgent:
             entropy_sap = jnp.mean(pi_sap.entropy())
             total_entropy = entropy_action + entropy_sap
             
-            # Use old_log_probs from parameters (passed into function)
             # Handle dimensional alignment
             if len(old_log_probs.shape) == 1:  # If [batch] shape
-                old_log_probs_aligned = old_log_probs[:, None]  # Make [batch, 1]
+                old_log_probs = old_log_probs[:, None]  # Make [batch, 1]
                 new_combined_log_probs = jnp.mean(new_combined_log_probs, axis=-1)
-            else:
-                old_log_probs_aligned = old_log_probs
             
-            # Calculate policy ratio for PPO (use aligned version)
-            ratio = jnp.exp(new_combined_log_probs - old_log_probs_aligned)
+            # Calculate policy ratio for PPO
+            ratio = jnp.exp(new_combined_log_probs - old_log_probs)
             
             # Apply PPO clip
             clipped_ratio = jnp.clip(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)

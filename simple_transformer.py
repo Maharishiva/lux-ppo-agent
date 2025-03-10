@@ -317,10 +317,11 @@ class SimplePPOAgent:
         # Construct actions
         actions = jnp.stack([action_types, sap_x, sap_y], axis=-1)
         
-        # Create action dictionary
+        # Create action dictionary - for proper self-play, both agents should use the policy
+        # During self-play, we'll sample actions for both players using the same policy
         action_dict = {
             "player_0": actions,
-            "player_1": jnp.zeros_like(actions)  # For self-play, we handle this differently
+            "player_1": actions  # Use the same actions for player_1 (self-play with shared policy)
         }
         
         return action_dict, log_probs, value[0], rng
@@ -454,17 +455,24 @@ class SimplePPOAgent:
             done = jax.tree_map(lambda t, tr: t | tr, terminated, truncated)
             done = jnp.array([done[f"player_{i}"] for i in range(2)]).any(axis=0)
             
-            # Extract rewards for player_0
+            # Extract rewards for both players
             rewards_player0 = reward["player_0"]
+            rewards_player1 = reward["player_1"]
             
-            # Store data
+            # Store data for player_0 (the agent we're training)
             observations.append(last_obs)
             actions.append(action_dict)
-            rewards.append(rewards_player0)
+            rewards.append(rewards_player0)  # Focus on player_0's rewards for training
             values.append(value)
             log_probs.append(log_prob)
             dones_list.append(done)
             infos.append(info)
+            
+            # For proper evaluation, we should track both players' rewards
+            if hasattr(self, 'player1_rewards'):
+                self.player1_rewards.append(rewards_player1)
+            else:
+                self.player1_rewards = [rewards_player1]
             
             # Update for next step
             last_obs = next_obs
@@ -658,7 +666,8 @@ class SimplePPOAgent:
             replay_dir = os.path.join(self.checkpoint_dir, f"replays_iter_{self.current_iteration}")
             os.makedirs(replay_dir, exist_ok=True)
         
-        total_rewards = []
+        total_rewards_p0 = []
+        total_rewards_p1 = []
         episode_lengths = []
         
         for episode in range(num_episodes):
@@ -672,11 +681,12 @@ class SimplePPOAgent:
                 actions_list = []
             
             done = False
-            episode_reward = 0
+            episode_reward_p0 = 0
+            episode_reward_p1 = 0
             step = 0
             
             while not done:
-                # Select action
+                # Select action for both players
                 self.rng, _rng = jax.random.split(self.rng)
                 action_dict, _, _, self.rng = self.select_action(
                     obs, self.rng, training=False, epsilon=0.0
@@ -693,9 +703,13 @@ class SimplePPOAgent:
                     states.append(env_state)
                     actions_list.append(action_dict)
                 
-                # Check for episode end
-                done = terminated["player_0"] or truncated["player_0"]
-                episode_reward += reward["player_0"]
+                # Track rewards for both players
+                episode_reward_p0 += reward["player_0"]
+                episode_reward_p1 += reward["player_1"]
+                
+                # Check for episode end (either player terminates)
+                done = (terminated["player_0"] or truncated["player_0"] or 
+                        terminated["player_1"] or truncated["player_1"])
                 step += 1
                 
                 # Update for next step
@@ -705,7 +719,8 @@ class SimplePPOAgent:
                 if step >= self.env_params.max_steps_in_match:
                     break
             
-            total_rewards.append(episode_reward)
+            total_rewards_p0.append(episode_reward_p0)
+            total_rewards_p1.append(episode_reward_p1)
             episode_lengths.append(step)
             
             # Save replay for this episode
@@ -714,22 +729,33 @@ class SimplePPOAgent:
                 self._save_replay(replay_path, states, actions_list, env_params=self.env_params)
                 replay_paths.append(replay_path)
             
-            print(f"Episode {episode+1}: Reward = {episode_reward:.2f}, Length = {step}")
+            print(f"Episode {episode+1}: Player 0 Reward = {episode_reward_p0:.2f}, Player 1 Reward = {episode_reward_p1:.2f}, Length = {step}")
         
         # Compute metrics
-        avg_reward = sum(total_rewards) / num_episodes
+        avg_reward_p0 = sum(total_rewards_p0) / num_episodes
+        avg_reward_p1 = sum(total_rewards_p1) / num_episodes
         avg_length = sum(episode_lengths) / num_episodes
         
+        # Calculate win rate (who gets higher reward)
+        p0_wins = sum(1 for p0, p1 in zip(total_rewards_p0, total_rewards_p1) if p0 > p1)
+        p1_wins = sum(1 for p0, p1 in zip(total_rewards_p0, total_rewards_p1) if p1 > p0)
+        draws = num_episodes - p0_wins - p1_wins
+        win_rate = (p0_wins + 0.5 * draws) / num_episodes
+        
         print(f"{Colors.HEADER}Evaluation Results:{Colors.ENDC}")
-        print(f"Average Reward: {Colors.GREEN}{avg_reward:.2f}{Colors.ENDC}")
+        print(f"Player 0 Average Reward: {Colors.GREEN}{avg_reward_p0:.2f}{Colors.ENDC}")
+        print(f"Player 1 Average Reward: {Colors.GREEN}{avg_reward_p1:.2f}{Colors.ENDC}")
+        print(f"Player 0 Win Rate: {Colors.YELLOW}{win_rate:.2f}{Colors.ENDC} (Wins: {p0_wins}, Losses: {p1_wins}, Draws: {draws})")
         print(f"Average Episode Length: {Colors.BLUE}{avg_length:.1f}{Colors.ENDC}")
         
         if save_replay and replay_paths:
             print(f"\nSaved {len(replay_paths)} replay files to {replay_dir}")
-            print(f"To visualize, run: python src/visualize_replay.py --replay-dir {replay_dir} --html")
+            print(f"To visualize, run: python visualize_replay.py --replay-path {replay_dir} --html")
         
         return {
-            "eval_reward": float(avg_reward),
+            "eval_reward_p0": float(avg_reward_p0),
+            "eval_reward_p1": float(avg_reward_p1),
+            "eval_win_rate": float(win_rate),
             "eval_length": float(avg_length),
             "replay_paths": replay_paths if save_replay else []
         }

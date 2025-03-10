@@ -89,13 +89,14 @@ def main():
         max_grad_norm=args.max_grad_norm,
         update_epochs=args.update_epochs,
         num_minibatches=args.num_minibatches,
-        num_envs=args.num_envs,
+        num_envs=1,  # We're actually only using 1 environment for now
         num_steps=args.num_steps,
         anneal_lr=True,
         debug=args.debug,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
-        seed=args.seed
+        seed=args.seed,
+        env_params=env_params  # Pass the environment parameters
     )
     
     # Load checkpoint if specified

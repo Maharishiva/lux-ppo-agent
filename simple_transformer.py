@@ -123,18 +123,23 @@ class SimplePPOAgent:
         max_grad_norm: float = 0.5,
         update_epochs: int = 4,
         num_minibatches: int = 4,
-        num_envs: int = 8,
+        num_envs: int = 1,  # Actually only using 1 environment for now
         num_steps: int = 128,
         anneal_lr: bool = True,
         name: str = "agent",
         debug: bool = False,
         checkpoint_dir: str = "checkpoints",
         log_dir: str = "logs",
-        seed: int = 0
+        seed: int = 0,
+        env_params: EnvParams = None  # Accept env_params from outside
     ):
         self.env = env
-        self.env_params = EnvParams(map_type=0)
+        # Use provided env_params or create default ones
+        self.env_params = env_params if env_params else EnvParams(map_type=0)
         self.hidden_size = hidden_size
+        # Initialize tracking for both players' rewards
+        self.player0_rewards = []
+        self.player1_rewards = []
         self.learning_rate = learning_rate
         self.gamma = gamma
         self.lambda_gae = lambda_gae
@@ -266,65 +271,73 @@ class SimplePPOAgent:
         
         return processed_obs
     
-    def select_action(self, obs, rng, training=True, epsilon=0.05):
+    def select_action(self, obs, rng, training=True, epsilon=0.01):
         """
         Select actions for all units based on current policy.
+        This generates SEPARATE actions for each player using the same policy.
         """
-        # Process observation
-        processed_obs = self.preprocess_obs(obs)
-        processed_obs = processed_obs[None, :]  # Add batch dimension
+        # Process observations for both players
+        processed_obs_p0 = self.preprocess_obs(obs, team_id=0)
+        processed_obs_p0 = processed_obs_p0[None, :]  # Add batch dimension
         
-        # Get action logits and value
-        action_logits, sap_logits, value = self.network.apply(self.train_state.params, processed_obs)
+        processed_obs_p1 = self.preprocess_obs(obs, team_id=1)
+        processed_obs_p1 = processed_obs_p1[None, :]  # Add batch dimension
         
-        # Create categorical distribution
-        pi_action_types = distrax.Categorical(logits=action_logits[0])  # Remove batch dimension
+        # Get action logits and value for player 0
+        action_logits_p0, sap_logits_p0, value_p0 = self.network.apply(
+            self.train_state.params, processed_obs_p0
+        )
         
-        # Split random key
-        rng, action_key = jax.random.split(rng)
+        # Get action logits and value for player 1
+        action_logits_p1, sap_logits_p1, value_p1 = self.network.apply(
+            self.train_state.params, processed_obs_p1
+        )
         
-        # Sample actions
-        if training and jax.random.uniform(action_key) < epsilon:
-            # Random exploration
-            rng, key1, key2 = jax.random.split(rng, 3)
-            action_types = jax.random.randint(key1, (self.env_params.max_units,), 0, 6)
-            sap_x = jax.random.randint(key2, (self.env_params.max_units,), -8, 9)
-            sap_y = jax.random.randint(key2, (self.env_params.max_units,), -8, 9)
-            log_probs = jnp.zeros(self.env_params.max_units)
-        else:
-            # Sample from policy
-            action_types = pi_action_types.sample(seed=action_key)
-            
-            # For sap actions, sample from the 17x17 grid
-            rng, sap_key = jax.random.split(rng)
-            sap_logits_flat = sap_logits[0].reshape(self.env_params.max_units, 17*17)
-            sap_pi = distrax.Categorical(logits=sap_logits_flat)
-            sap_indices = sap_pi.sample(seed=sap_key)
-            
-            # Convert indices to x,y coordinates (-8 to 8)
-            sap_x = (sap_indices % 17) - 8
-            sap_y = (sap_indices // 17) - 8
-            
-            # Get log probabilities
-            log_probs = pi_action_types.log_prob(action_types)
-            
-            # Calculate sap log probabilities
-            sap_log_probs = sap_pi.log_prob(sap_indices)
-            
-            # Combine log probabilities - only consider action types for now
-            # log_probs = log_probs + sap_log_probs  # We'll just use action_type for loss
+        # Create categorical distributions
+        pi_action_types_p0 = distrax.Categorical(logits=action_logits_p0[0])
+        pi_action_types_p1 = distrax.Categorical(logits=action_logits_p1[0])
+        
+        # Split random keys
+        rng, action_key_p0, action_key_p1, sap_key_p0, sap_key_p1 = jax.random.split(rng, 5)
+        
+        # Sample actions for player 0
+        action_types_p0 = pi_action_types_p0.sample(seed=action_key_p0)
+        sap_logits_flat_p0 = sap_logits_p0[0].reshape(self.env_params.max_units, 17*17)
+        sap_pi_p0 = distrax.Categorical(logits=sap_logits_flat_p0)
+        sap_indices_p0 = sap_pi_p0.sample(seed=sap_key_p0)
+        
+        # Convert indices to x,y coordinates (-8 to 8)
+        sap_x_p0 = (sap_indices_p0 % 17) - 8
+        sap_y_p0 = (sap_indices_p0 // 17) - 8
+        
+        # Sample actions for player 1
+        action_types_p1 = pi_action_types_p1.sample(seed=action_key_p1)
+        sap_logits_flat_p1 = sap_logits_p1[0].reshape(self.env_params.max_units, 17*17)
+        sap_pi_p1 = distrax.Categorical(logits=sap_logits_flat_p1)
+        sap_indices_p1 = sap_pi_p1.sample(seed=sap_key_p1)
+        
+        # Convert indices to x,y coordinates (-8 to 8)
+        sap_x_p1 = (sap_indices_p1 % 17) - 8
+        sap_y_p1 = (sap_indices_p1 // 17) - 8
+        
+        # Get log probabilities
+        log_probs_p0 = pi_action_types_p0.log_prob(action_types_p0)
+        sap_log_probs_p0 = sap_pi_p0.log_prob(sap_indices_p0)
+        
+        # Combine log probabilities - use both action types and sap positions
+        combined_log_probs = log_probs_p0 + sap_log_probs_p0
         
         # Construct actions
-        actions = jnp.stack([action_types, sap_x, sap_y], axis=-1)
+        actions_p0 = jnp.stack([action_types_p0, sap_x_p0, sap_y_p0], axis=-1)
+        actions_p1 = jnp.stack([action_types_p1, sap_x_p1, sap_y_p1], axis=-1)
         
-        # Create action dictionary - for proper self-play, both agents should use the policy
-        # During self-play, we'll sample actions for both players using the same policy
+        # Create action dictionary
         action_dict = {
-            "player_0": actions,
-            "player_1": actions  # Use the same actions for player_1 (self-play with shared policy)
+            "player_0": actions_p0,
+            "player_1": actions_p1  # Separate actions for player_1
         }
         
-        return action_dict, log_probs, value[0], rng
+        return action_dict, combined_log_probs, value_p0[0], rng
     
     def train_selfplay(self, num_iterations, eval_frequency=10, save_frequency=10, small_test=False):
         """
@@ -522,18 +535,38 @@ class SimplePPOAgent:
         # Calculate returns/targets
         returns = advantages + values
         
-        # For small test and debug, use dummy observations
-        dummy_obs = jnp.zeros((self.num_steps, 2000))
+        # Get REAL observations from trajectories
+        observations = trajectories.obs
         
-        # Get actions, but only for player_0's first unit as simplified example
-        b_actions = trajectories.action["player_0"][:, 0, 0]
+        # Process observations for each timestep
+        processed_obs = []
+        for t in range(self.num_steps):
+            # Process the observation for player_0 at this timestep
+            proc_obs = self.preprocess_obs(observations[t], team_id=0)
+            processed_obs.append(proc_obs)
+        
+        # Stack processed observations
+        b_obs = jnp.stack(processed_obs)
+        
+        # Get ALL actions for player_0 (all units, all components)
+        # Shape should be [num_steps, num_units, 3] where 3 is (action_type, sap_x, sap_y)
+        player0_actions = trajectories.action["player_0"]
+        
+        # Extract action components
+        b_action_types = player0_actions[:, :, 0]  # [:, num_units]
+        b_sap_indices = player0_actions[:, :, 1:3]  # [:, num_units, 2] for (x,y)
+        
+        # Convert sap x,y back to flat indices for the loss calculation
+        b_sap_x = b_sap_indices[:, :, 0]  # [:, num_units]
+        b_sap_y = b_sap_indices[:, :, 1]  # [:, num_units]
+        
+        # Convert from coordinate system (-8 to 8) to flat index (0 to 16*16)
+        b_sap_flat_indices = (b_sap_y + 8) * 17 + (b_sap_x + 8)
+        
         b_returns = returns
         b_advantages = advantages
         b_values = values
         b_log_probs = trajectories.log_prob
-        
-        # Use dummy observations instead of actual ones for simplicity
-        b_obs = dummy_obs
         
         # Normalize advantages (important for training stability)
         b_advantages = (b_advantages - jnp.mean(b_advantages)) / (jnp.std(b_advantages) + 1e-8)
@@ -559,7 +592,8 @@ class SimplePPOAgent:
                 
                 # Get mini-batch data
                 mb_obs = b_obs[mb_indices]
-                mb_actions = b_actions[mb_indices]
+                mb_action_types = b_action_types[mb_indices]
+                mb_sap_indices = b_sap_flat_indices[mb_indices]
                 mb_returns = b_returns[mb_indices]
                 mb_advantages = b_advantages[mb_indices]
                 mb_log_probs = b_log_probs[mb_indices]
@@ -567,7 +601,8 @@ class SimplePPOAgent:
                 
                 # Update policy and value function
                 self.train_state, loss_info = self._update_minibatch(
-                    mb_obs, mb_actions, mb_returns, mb_advantages, mb_log_probs, mb_values
+                    mb_obs, mb_action_types, mb_sap_indices, mb_returns, 
+                    mb_advantages, mb_log_probs, mb_values
                 )
         
         return self.train_state, loss_info
@@ -596,43 +631,62 @@ class SimplePPOAgent:
         
         return advantages
     
-    def _update_minibatch(self, obs, actions, returns, advantages, old_log_probs, old_values):
+    def _update_minibatch(self, obs, action_types, sap_indices, returns, advantages, old_log_probs, old_values):
         """
         Update policy on a minibatch using PPO.
+        Process ALL units and BOTH action components (action_type and sap position).
         """
         def loss_fn(params, old_log_probs=old_log_probs):
             # Forward pass
-            action_logits, _, values = self.network.apply(params, obs)
+            action_logits, sap_logits, values = self.network.apply(params, obs)
             
-            # Extract logits for the first unit - simplification
-            action_logits_unit = action_logits[:, 0, :]
+            # Create policy distributions for action types (for all units)
+            # This handles shape: [batch, max_units, 6]
+            pi_action = distrax.Categorical(logits=action_logits)
             
-            # Create policy distribution
-            pi = distrax.Categorical(logits=action_logits_unit)
+            # Create policy distributions for sap targets (for all units)
+            # Need to reshape to [batch * max_units, 17*17]
+            batch_size, max_units = action_logits.shape[0], action_logits.shape[1]
+            sap_logits_flat = sap_logits.reshape(batch_size, max_units, 17*17)
+            pi_sap = distrax.Categorical(logits=sap_logits_flat)
             
             # Calculate new log probabilities
-            new_log_probs = pi.log_prob(actions)
+            new_log_probs_action = pi_action.log_prob(action_types)  # [batch, max_units]
+            new_log_probs_sap = pi_sap.log_prob(sap_indices)        # [batch, max_units]
             
-            # Calculate entropy (to encourage exploration)
-            entropy = jnp.mean(pi.entropy())
+            # Combine both log probs (action_type and sap position)
+            new_combined_log_probs = new_log_probs_action + new_log_probs_sap  # [batch, max_units]
             
-            # Handle shape differences in log probabilities - make a copy to avoid modifying the input
-            m_old_log_probs = old_log_probs
-            if len(m_old_log_probs.shape) > 1:
-                m_old_log_probs = m_old_log_probs[:, 0]  # Take only the first unit's log probs
+            # Calculate entropy (to encourage exploration) - use mean over all units
+            entropy_action = jnp.mean(pi_action.entropy())
+            entropy_sap = jnp.mean(pi_sap.entropy())
+            total_entropy = entropy_action + entropy_sap
+            
+            # Reshape if necessary to match dimensions between old and new log probs
+            if len(old_log_probs.shape) == 1:  # If [batch] shape
+                old_log_probs = old_log_probs[:, None]  # Make [batch, 1]
                 
-            # Calculate policy ratio and clipped ratio
-            ratio = jnp.exp(new_log_probs - m_old_log_probs)
+                # And then we need to reduce the new log probs to match
+                new_combined_log_probs = jnp.mean(new_combined_log_probs, axis=-1)  # Average over units
+            
+            # Calculate policy ratio and clipped ratio - make sure shapes match
+            ratio = jnp.exp(new_combined_log_probs - old_log_probs)
             clipped_ratio = jnp.clip(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
             
             # Calculate PPO loss
+            if len(advantages.shape) == 1:  # If [batch] shape
+                advantages = advantages[:, None]  # Make [batch, 1] to match ratio
+                
             surrogate1 = ratio * advantages
             surrogate2 = clipped_ratio * advantages
             
-            # Policy loss (negative because we want to maximize)
+            # Policy loss (negative because we want to maximize) - mean over units and batch
             policy_loss = -jnp.mean(jnp.minimum(surrogate1, surrogate2))
             
-            # Value function loss
+            # Value function loss - make sure returns and values shapes match
+            if len(values.shape) > 1 and values.shape[0] == batch_size:
+                values = values.reshape(-1)  # Flatten to [batch]
+                
             value_pred_clipped = old_values + jnp.clip(
                 values - old_values, -self.clip_eps, self.clip_eps
             )
@@ -641,9 +695,9 @@ class SimplePPOAgent:
             value_loss = 0.5 * jnp.mean(jnp.maximum(value_losses, value_losses_clipped))
             
             # Total loss
-            total_loss = policy_loss + self.vf_coef * value_loss - self.entropy_coef * entropy
+            total_loss = policy_loss + self.vf_coef * value_loss - self.entropy_coef * total_entropy
             
-            return total_loss, (value_loss, policy_loss, entropy)
+            return total_loss, (value_loss, policy_loss, total_entropy)
         
         # Calculate gradients
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
